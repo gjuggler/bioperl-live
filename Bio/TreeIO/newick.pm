@@ -73,15 +73,12 @@ Internal methods are usually preceded with a _
 # Let the code begin...
 
 package Bio::TreeIO::newick;
-use vars qw($DefaultBootstrapStyle);
 use strict;
+use Switch;
 
 use Bio::Event::EventGeneratorI;
 
-#initialize some package variables, could use 'our' but fails in perl < 5.6
-
-$DefaultBootstrapStyle = 'traditional';
-use base qw(Bio::TreeIO);
+use base qw(Bio::TreeIO Bio::TreeIO::NewickParser);
 
 =head2 new
 
@@ -95,20 +92,14 @@ use base qw(Bio::TreeIO);
 =cut
 
 sub _initialize {
-    my $self = shift;
-    $self->SUPER::_initialize(@_);
-    my ( $print_count, $style, $order_by ) = $self->_rearrange(
-        [
-            qw(PRINT_COUNT
-              BOOTSTRAP_STYLE
-              ORDER_BY)
-        ],
-        @_
-    );
-    $self->print_tree_count( $print_count || 0 );
-    $self->bootstrap_style( $style || $DefaultBootstrapStyle );
-    $self->order_by($order_by) if defined $order_by;
-    return;
+  my $self = shift;
+  $self->SUPER::_initialize(@_);
+  my ($print_count) = $self->_rearrange( [ qw(PRINT_COUNT) ], @_ );
+
+  if ($print_count) {
+    $self->param('print_tree_count',1);
+  }
+  return;
 }
 
 =head2 next_tree
@@ -123,145 +114,77 @@ sub _initialize {
 =cut
 
 sub next_tree {
-    my ($self) = @_;
-    local $/ = ";\n";
-    return unless $_ = $self->_readline;
-    s/[\r\n]//gs;
-    my $score;
-    my $despace = sub { my $dirty = shift; $dirty =~ s/\s+//gs; return $dirty };
-    my $dequote = sub {
-        my $dirty = shift;
-        $dirty =~ s/^"?\s*(.+?)\s*"?$/$1/;
-        return $dirty;
-    };
-s/([^"]*)(".+?")([^"]*)/$despace->($1) . $dequote->($2) . $despace->($3)/egsx;
+  my ($self) = @_;
+  local $/ = ";\n";
+  return unless $_ = $self->_readline;
 
-    if (s/^\s*\[([^\]]+)\]//) {
-        my $match = $1;
-        $match =~ s/\s//g;
-        $match =~ s/lh\=//;
-        if ( $match =~ /([-\d\.+]+)/ ) {
-            $score = $1;
-        }
+  s/[\r\n]//gs;
+  my $score;
+  my $despace = sub { my $dirty = shift; $dirty =~ s/\s+//gs; return $dirty };
+  my $dequote = sub {
+    my $dirty = shift;
+    $dirty =~ s/^"?\s*(.+?)\s*"?$/$1/;
+    return $dirty;
+  };
+  s/([^"]*)(".+?")([^"]*)/$despace->($1) . $dequote->($2) . $despace->($3)/egsx;
+
+  if (s/^\s*\[([^\]]+)\]//) {
+    my $match = $1;
+    $match =~ s/\s//g;
+    $match =~ s/lh\=//;
+    if ( $match =~ /([-\d\.+]+)/ ) {
+      $score = $1;
     }
+  }
 
-    $self->debug("entry is $_\n");
+  $self->_eventHandler->start_document;
 
-    #   my $empty = chr(20);
+  # Call the parse_newick method as defined in NewickParser.pm
+  $self->parse_newick($_);
 
-    # replace empty labels with a tag
-    #   s/\(,/\($empty,/ig;
-    #   s/,,/,$empty,/ig;
-    #   s/,,/,/ig;
-    #   s/,\)/,$empty\)/ig;
-    #   s/\"/\'/ig;
+  my $tree = $self->_eventHandler->end_document;
 
-    my $chars = '';
-    $self->_eventHandler->start_document;
-    my ( $prev_event, $lastevent, $id ) = ( '', '', '' );
-    foreach my $ch ( split( //, $_ ) ) {
-        if ( $ch eq ';' ) {
-            my $tree = $self->_eventHandler->end_document($chars);
-            $tree->score($score) if defined $score;
-            if ( $self->internal_node_id eq 'bootstrap' ) {
-                $tree->move_id_to_bootstrap;
-            }
-            return $tree;
-        }
-        elsif ( $ch eq '(' ) {
-            $chars = '';
-            $self->_eventHandler->start_element( { 'Name' => 'tree' } );
-        }
-        elsif ( $ch eq ')' ) {
-            if ( length($chars) ) {
-                if ( $lastevent eq ':' ) {
-                    $self->_eventHandler->start_element(
-                        { 'Name' => 'branch_length' } );
-                    $self->_eventHandler->characters($chars);
-                    $self->_eventHandler->end_element(
-                        { 'Name' => 'branch_length' } );
-                    $lastevent = $prev_event;
-                }
-                else {
-                    $self->debug(
-                        "internal node, id with no branchlength is $chars\n");
-                    $self->_eventHandler->start_element( { 'Name' => 'node' } );
-                    $self->_eventHandler->start_element( { 'Name' => 'id' } );
-                    $self->_eventHandler->characters($chars);
-                    $self->_eventHandler->end_element( { 'Name' => 'id' } );
-                    $id = $chars;
-                }
-                my $leafstatus = 0;
-                if ( $lastevent ne ')' ) {
-                    $leafstatus = 1;
-                }
+  # Add the tree score afterwards if it exists.
+  if ( defined $tree ) {
+    $tree->score($score);
+    return $tree;
+  }
+}
 
-                $self->_eventHandler->start_element( { 'Name' => 'leaf' } );
-                $self->_eventHandler->characters($leafstatus);
-                $self->_eventHandler->end_element( { 'Name' => 'leaf' } );
-                $id = '';
-            }
-            else {
-                $self->_eventHandler->start_element( { 'Name' => 'node' } );
-            }
+=head2 get_default_params
 
-            $self->_eventHandler->end_element( { 'Name' => 'node' } );
-            $self->_eventHandler->end_element( { 'Name' => 'tree' } );
-            $chars = '';
-        }
-        elsif ( $ch eq ',' ) {
-            if ( length($chars) ) {
-                if ( $lastevent eq ':' ) {
-                    $self->_eventHandler->start_element(
-                        { 'Name' => 'branch_length' } );
-                    $self->_eventHandler->characters($chars);
-                    $self->_eventHandler->end_element(
-                        { 'Name' => 'branch_length' } );
-                    $lastevent = $prev_event;
-                    $chars     = '';
-                }
-                else {
-                    $self->debug("leaf id with no branchlength is $chars\n");
-                    $self->_eventHandler->start_element( { 'Name' => 'node' } );
-                    $self->_eventHandler->start_element( { 'Name' => 'id' } );
-                    $self->_eventHandler->characters($chars);
-                    $self->_eventHandler->end_element( { 'Name' => 'id' } );
-                    $id = $chars;
-                }
-            }
-            else {
-                $self->_eventHandler->start_element( { 'Name' => 'node' } );
-            }
-            my $leafstatus = 0;
-            if ( $lastevent ne ')' ) {
-                $leafstatus = 1;
-            }
-            $self->_eventHandler->start_element( { 'Name' => 'leaf' } );
-            $self->_eventHandler->characters($leafstatus);
-            $self->_eventHandler->end_element( { 'Name' => 'leaf' } );
-            $self->_eventHandler->end_element( { 'Name' => 'node' } );
-            $chars = '';
-            $id    = '';
-        }
-        elsif ( $ch eq ':' ) {
-            $self->debug("id with a branchlength coming is $chars\n");
-            $self->_eventHandler->start_element( { 'Name' => 'node' } );
-            $self->_eventHandler->start_element( { 'Name' => 'id' } );
-            $self->_eventHandler->characters($chars);
-            $self->_eventHandler->end_element( { 'Name' => 'id' } );
-            $id    = $chars;
-            $chars = '';
-        }
-        else {
-            $chars .= $ch;
-            next;
-        }
-        $prev_event = $lastevent;
-        $lastevent  = $ch;
-    }
-    my $tree = $self->_eventHandler->end_document($chars);
-    return $tree if $tree;
-    return;
+ Title   : get_default_params
+ Usage   : my $params = $treeio->get_default_params;
+ Function: Returns a hashref containing the default set of parsing & writing parameters for the Newick format.
+ Returns : Hashref
+ Args    : none
+
+=cut
+
+sub get_default_params {
+  my $self = shift;
+
+  return {
+    order_by => ''
+    , # Changes the tree's node ordering. Only the default value (blank) is currently supported, which leads to alphanumeric sorting of sibling nodes.
+    bootstrap_style => 'traditional',    # Can be 'traditional', 'molphy', 'nobranchlength'
+
+    #           'nobranchlength'   --> don't draw any branch lengths - this
+    #                                  is helpful if you don't want to have to
+    #                                  go through and delete branch len on all nodes
+    #           'molphy' --> draw bootstraps (100) like
+    #                                  (A:0.11,B:0.22):0.33[100];
+    #           'traditional' --> draw bootstraps (100) like
+    #                                  (A:0.11,B:0.22)100:0.33;
+    internal_node_id => 'id',            # Can be 'id' or 'bootstrap'
+
+    no_branch_lengths       => 0,        # Set to 1 to turn off all output of branch lengths
+    no_bootstrap_values     => 0,        # Set to 1 to turn off all output of bootstrap values
+    no_internal_node_labels => 0,        # Set to 1 to turn off all output of internal node labels
+
+    newline_each_node => 0,              # Set to 1 to add a new line after each node.
+    print_tree_count  => 0,              # Set to 1 to print out the # of trees at the beginning.
+  };
 }
 
 =head2 write_tree
@@ -275,222 +198,104 @@ s/([^"]*)(".+?")([^"]*)/$despace->($1) . $dequote->($2) . $despace->($3)/egsx;
 =cut
 
 sub write_tree {
-    my ( $self, @trees ) = @_;
-    my $orderby         = $self->order_by;
-    my $bootstrap_style = $self->bootstrap_style;
-    if ( $self->print_tree_count ) {
-        $self->_print( sprintf( " %d\n", scalar @trees ) );
-    }
-    my $nl = $self->newline_each_node;
-    foreach my $tree (@trees) {
+  my ( $self, @trees ) = @_;
+  if ( $self->param('print_tree_count') ) {
+    $self->_print( sprintf( " %d\n", scalar @trees ) );
+  }
 
-        if (  !defined $tree
-            || ref($tree) =~ /ARRAY/i
-            || !$tree->isa('Bio::Tree::TreeI') )
-        {
-            $self->throw(
-                "Calling write_tree with non Bio::Tree::TreeI object\n");
-        }
-        my @data =
-          _write_tree_Helper( $tree->get_root_node, $bootstrap_style, $orderby,
-            $nl );
-        if ($nl) {
-            chomp( $data[-1] );    # remove last newline
-            $self->_print( join( ",\n", @data ), ";\n" );
-        }
-        else {
-            $self->_print( join( ',', @data ), ";\n" );
-        }
+  my $params = $self->get_params;
+
+  foreach my $tree (@trees) {
+    if (!defined $tree
+      || ref($tree) =~ /ARRAY/i
+      || !$tree->isa('Bio::Tree::TreeI') ) {
+      $self->throw("Calling write_tree with non Bio::Tree::TreeI object\n");
     }
-    $self->flush if $self->_flush_on_write && defined $self->_fh;
-    return;
+    my @data = $self->_write_tree_Helper( $tree->get_root_node, $params );
+    $self->_print( join( ',', @data ) . ";" );
+  }
+
+  $self->flush if $self->_flush_on_write && defined $self->_fh;
+  return;
 }
 
 sub _write_tree_Helper {
-    my ( $node, $style, $orderby, $nl ) = @_;
-    $style = '' unless defined $style;
-    return () if ( !defined $node );
+  my $self = shift;
+  my ( $node, $params ) = @_;
+  my @data;
 
-    my @data;
-    foreach my $n ( $node->each_Descendent($orderby) ) {
-        push @data, _write_tree_Helper( $n, $style, $orderby, $nl );
-    }
+  foreach my $n ( $node->each_Descendent( $params->{order_by} ) ) {
+    push @data, $self->_write_tree_Helper( $n, $params );
+  }
 
-    # let's explicitly write out the bootstrap if we've got it
-    my $id = $node->id_output;
-    my $bs = $node->bootstrap;    # bs better not have any spaces?
-    $bs =~ s/\s+//g if defined $bs;
-    my $bl = $node->branch_length;
-    if (@data) {
-        if ($nl) {
-            $data[0] = "(\n" . $data[0];
-            $data[-1] .= ")\n";
-        }
-        else {
-            $data[0] = "(" . $data[0];
-            $data[-1] .= ")";
-        }
+  my $label = $self->_node_as_string( $node, $params );
 
-        if ( $node->is_Leaf ) {
-            $node->debug("node is a leaf!  This is unexpected...");
+  if ( scalar(@data) >= 1 ) {
+    $data[0] = "(" . $data[0];
+    $data[-1] .= ")";
+    $data[-1] .= $label;
+  } else {
+    push @data, $label;
+  }
 
-            $id ||= '';
-            if (   !defined $bl
-                || !length($bl)
-                || ( $style && $style =~ /nobranchlength/i ) )
-            {
-                $data[-1] .= $id;
-            }
-            elsif ( defined $bl && length($bl) ) {
-                $data[-1] .= "$id:$bl";
-            }
-            else {
-                $data[-1] .= $id;
-            }
-        }
-        else {
-            if (   !defined $bl
-                || !length($bl)
-                || ( $style && $style =~ /nobranchlength/i ) )
-            {
-                # branch length on root node - bug 3039
-                if ( defined $id && $id == '0.0' ) {
-                    $data[-1] .= defined $bs ? $bs : ":$id";
-                }
-                # not sure what case this represents - Dave Messina 20100401
-                elsif ( defined $id || defined $bs ) {
-                    $data[-1] .= defined $bs ? $bs : $id;
-                }
-            }
-            elsif ( $style =~ /molphy/i ) {
-                if ( defined $id ) {
-                    $data[-1] .= $id;
-                }
-                if ( $bl =~ /\#/ ) {
-                    $data[-1] .= $bl;
-                }
-                else {
-                    $data[-1] .= ":$bl";
-                }
-                if ( defined $bs ) {
-                    $data[-1] .= "[$bs]";
-                }
-            }
-            else {
-
-                # traditional style of
-                # ((A:1,B:2)81:3);   where 3 is internal node branch length
-                #                    and 81 is bootstrap/node label
-                if ( defined $bs || defined $id ) {
-                    $data[-1] .= defined $bs ? "$bs:$bl" : "$id:$bl";
-                }
-                elsif ( $bl =~ /\#/ ) {
-                    $data[-1] .= $bl;
-                }
-                else {
-                    $data[-1] .= ":$bl";
-                }
-            }
-        }
-    }
-    elsif ( defined $id || defined $bl ) {
-        my $str;
-        $id ||= '';
-        if (   !defined $bl
-            || !length($bl)
-            || ( $style && $style =~ /nobranchlength/i ) )
-        {
-            $str = $id;
-        }
-        elsif ( defined $bl && length($bl) ) {
-            $str = "$id:$bl";
-        }
-        else {
-            $str = $id;
-        }
-        push @data, $str;
-    }
-    return @data;
+  return @data;
 }
 
-=head2 print_tree_count
+=head2 node_as_string
 
- Title   : print_tree_count
- Usage   : $obj->print_tree_count($newval)
- Function: Get/Set flag for printing out the tree count (paml,protml way)
- Returns : value of print_tree_count (a scalar)
- Args    : on set, new value (a scalar or undef, optional)
-
+ Title   : node_as_string
+ Usage   : my $string = $treeio->_node_as_string($node,$params);
+ Function: Returns a string representation of the given node (and *just* the given node -- this is not recursive!)
+ Returns : string
+ Args    : none
 
 =cut
 
-sub print_tree_count {
-    my $self = shift;
-    return $self->{'_print_tree_count'} = shift if @_;
-    return $self->{'_print_tree_count'} || 0;
-}
+sub _node_as_string {
+  my $self   = shift;
+  my $node   = shift;
+  my $params = shift;
 
-=head2 bootstrap_style
+  my $label_stringbuffer = '';
 
- Title   : bootstrap_style
- Usage   : $obj->bootstrap_style($newval)
- Function: A description of how bootstraps and branch lengths are
-           written, as the ID part of the internal node or else in []
-           in the branch length (Molphy-like; I am sure there is a
-           better name for this but am not sure where to go for some
-           sort of format documentation)
+  if ( $params->{no_bootstrap_values} != 1
+    && !$node->is_Leaf
+    && defined $node->bootstrap
+    && $params->{bootstrap_style}  eq 'traditional'
+    && $params->{internal_node_id} eq 'bootstrap' ) {
 
-           If no branch lengths are requested then no bootstraps are usually
-           written (unless someone REALLY wants this functionality...)
+    # If we're an internal node and we're using 'traditional' bootstrap style,
+    # we output the bootstrap instead of any label.
+    my $bootstrap = $node->bootstrap;
+    $label_stringbuffer .= $bootstrap if ( defined $bootstrap );
+  } elsif ( $params->{no_internal_node_labels} != 1 ) {
 
-           Can take on strings which contain the possible values of
-           'nobranchlength'   --> don't draw any branch lengths - this
-                                  is helpful if you don't want to have to 
-                                  go through and delete branch len on all nodes
-           'molphy' --> draw bootstraps (100) like
-                                  (A:0.11,B:0.22):0.33[100];
-           'traditional' --> draw bootstraps (100) like
-                                  (A:0.11,B:0.22)100:0.33;
- Returns : value of bootstrap_style (a scalar)
- Args    : on set, new value (a scalar or undef, optional)
+    # Tack on the internal label unless the $params specifically disallow them.
+    my $id = $node->id;
+    $label_stringbuffer .= $id if ( defined $id );
+  }
 
+  if ( $params->{no_branch_lengths} != 1 ) {
 
-=cut
+    # Tack on the branch length.
+    my $blen = $node->branch_length;
+    $label_stringbuffer .= ":" . $blen if ( defined $blen );
+  }
 
-sub bootstrap_style {
-    my $self = shift;
-    my $val  = shift;
-    if ( defined $val ) {
+  if ( $params->{bootstrap_style} eq 'molphy' && $params->{no_bootstrap_values} != 1 ) {
 
-        if ( $val !~ /^nobranchlength|molphy|traditional/i ) {
-            $self->warn(
-"requested an unknown bootstrap style $val, expect one of nobranchlength,molphy,traditional, not updating value.  Default is $DefaultBootstrapStyle\n"
-            );
-        }
-        else {
-            $self->{'_bootstrap_style'} = $val;
-        }
-    }
-    return $self->{'_bootstrap_style'} || $DefaultBootstrapStyle;
-}
+    # Tack on a molphy-style bootstrap values unless the no_bootstrap_values is set.
+    my $bootstrap = $node->bootstrap;
+    $label_stringbuffer .= "[$bootstrap]" if ( defined $bootstrap );
+  }
 
-=head2 order_by
+  if ( $params->{newline_each_node} == 1 ) {
 
- Title   : order_by
- Usage   : $obj->order_by($newval)
- Function: Allow node order to be specified (typically "alpha")
-           See L<Bio::Node::Node::each_Descendent()>
- Returns : value of order_by (a scalar)
- Args    : on set, new value (a scalar or undef, optional)
+    # Add a newline if we're meant to.
+    $label_stringbuffer .= "\n";
+  }
 
-
-=cut
-
-sub order_by {
-    my $self = shift;
-
-    return $self->{'order_by'} = shift if @_;
-    return $self->{'order_by'};
+  return $label_stringbuffer;
 }
 
 1;

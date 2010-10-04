@@ -90,8 +90,6 @@ use Bio::TreeIO::TreeEventBuilder;
 
 use base qw(Bio::Root::Root Bio::Root::IO Bio::Event::EventGeneratorI Bio::Factory::TreeFactoryI);
 
-use constant INTERNAL_NODE_ID => 'id'; # id or bootstrap, default is 'id' 
-
 =head2 new
 
  Title   : new
@@ -107,35 +105,33 @@ use constant INTERNAL_NODE_ID => 'id'; # id or bootstrap, default is 'id'
      svggraph           SVG graphical representation of tree
      tabtree            ASCII text representation of tree
      lintree            lintree output format
-   -internal_node_id : what is stored in the internal node ids, 
-                       bootstrap values or ids, coded as 
-                       'bootstrap' or 'id'
 
 =cut
 
 sub new {
   my($caller,@args) = @_;
   my $class = ref($caller) || $caller;
-    
-    # or do we want to call SUPER on an object if $caller is an
-    # object?
-    if( $class =~ /Bio::TreeIO::(\S+)/ ) {
-    my ($self) = $class->SUPER::new(@args);     
-    $self->_initialize(@args);
-    return $self;
-    } else { 
 
+    # or do we want to call SUPER on an object if $caller is an
+    # object?n
+
+  my $obj;
+  if( $class =~ /Bio::TreeIO::(\S+)/ ) {
+    $obj = $class->SUPER::new(@args);
+    $obj->_initialize(@args);
+  } else {     
     my %param = @args;
     @param{ map { lc $_ } keys %param } = values %param; # lowercase keys
     my $format = $param{'-format'} || 
-        $class->_guess_format( $param{'-file'} || $ARGV[0] ) ||
-        'newick';
+      $class->_guess_format( $param{'-file'} || $ARGV[0] ) ||
+      'newick';
     $format = "\L$format";  # normalize capitalization to lower case
-    
+      
     # normalize capitalization
-    return unless( $class->_load_format_module($format) );
-    return "Bio::TreeIO::$format"->new(@args);
-    }
+    return undef unless( $class->_load_format_module($format) );
+    $obj = "Bio::TreeIO::$format"->new(@args);
+  }
+  return $obj;
 }
 
 
@@ -210,16 +206,18 @@ sub _eventHandler{
 sub _initialize {
     my($self, @args) = @_;
     $self->{'_handler'} = undef;
-    my $internal_node_id;
-    $self->{'internal_node_id'} = INTERNAL_NODE_ID;
-    ($self->{'newline_each_node'},$internal_node_id) = $self->_rearrange
+
+    $self->get_params; # Initialize the default parameters.
+
+    my ($nen,$ini) = $self->_rearrange
     ([qw(NEWLINE_EACH_NODE INTERNAL_NODE_ID)],@args);
-    
-    # initialize the IO part
-    $self->_initialize_io(@args);
+    $self->set_param('newline_each_node',$nen);
+    $self->set_param('internal_node_id',$ini);
+
     $self->attach_EventHandler(Bio::TreeIO::TreeEventBuilder->new
                    (-verbose => $self->verbose(), @args));
-    $self->internal_node_id($internal_node_id) if defined $internal_node_id;
+    $self->_initialize_io(@args);
+    #$self->debug_params;
 }
 
 =head2 _load_format_module
@@ -241,6 +239,7 @@ sub _load_format_module {
   eval {
       $ok = $self->_load_module($module);
   };
+
   if ( $@ ) {
     print STDERR <<END;
 $self: $format cannot be found
@@ -253,53 +252,151 @@ END
   return $ok;
 }
 
-=head2 newline_each_node
+=head2 param
 
- Title   : newline_each_node
- Usage   : $obj->newline_each_node($newval)
- Function: Get/set newline each node flag which is only applicable
-           for writing tree formats for nhx and newick, will
-           print a newline after each node or paren
- Returns : value of newline_each_node (boolean)
- Args    : on set, new value (a boolean or undef, optional)
-
+ Title   : param
+ Usage   : my $newline_each_node = $treeio->param('newline_each_node');
+ Function: Fetches (if no arguments are given) or sets (if an argument is given) the named parameter from the TreeIO object's internal hash.
+ Example : 
+ Returns : string, number or hash/array reference
+ Args    : parameter (optional)
 
 =cut
 
-sub newline_each_node{
-    my $self = shift;
-    return $self->{'newline_each_node'} = shift if @_;
-    return $self->{'newline_each_node'};
+sub param {
+  my $self = shift;
+  my $param = shift;
+  my $value = shift;
+
+  if (defined $value) {
+    $self->get_params->{$param} = $value;
+  }
+  return $self->get_params->{$param};
 }
 
-=head2 internal_node_id
+=head2 set_param
 
- Title   : internal_node_id
- Usage   : $obj->internal_node_id($newval)
- Function: Internal Node Id type, coded as 'bootstrap' or 'id'
-           Default is 'id'
- Returns : value of internal_node_id (a scalar)
- Args    : on set, new value (a scalar or undef, optional)
-
+ Title   : set_param
+ Usage   : $treeio->set_param('no_bootstrap_values',1); # Tells the $treeio object not to output bootstrap values.
+ Function: Sets the TreeIO instance's named parameter.
+ Example : 
+ Returns : nothing
+ Args    : parameter, value
 
 =cut
 
-sub internal_node_id{
-    my $self = shift;
-    my $val = shift;
-    if( defined $val ) {
-    if( $val =~ /^b/i ) {
-        $val = 'bootstrap';
-    } elsif( $val =~ /^i/ ) {
-        $val = 'id';
-    } else {
-        $self->warn("Unknown value $val for internal_node_id not resetting value\n");
-    }   
-    return $self->{'internal_node_id'} = $val;  
-    }
-    return $self->{'internal_node_id'};
+sub set_param {
+  my $self = shift;
+  my $param = shift;
+  my $value = shift;
+
+  #print STDERR "[$param] -> [undef]\n" if (!defined $value);
+  return unless (defined $value);
+  #print STDERR "[$param] -> [$value]\n";
+
+  $self->get_params->{$param} = $value;
+  return $self->param($param);
 }
 
+=head2 params
+
+ Title   : params
+ Usage   : my $params = $treeio->params;
+ Function: Alias for get_params.
+ Example : 
+ Returns : hashref
+ Args    : none
+
+=cut
+
+sub params {
+  my $self = shift;
+  return $self->get_params;
+}
+
+=head2 get_params
+
+ Title   : get_params
+ Usage   : my $params = $treeio->get_params;
+ Function: Gets the entire hashmap of TreeIO params from an instance.
+ Example : 
+ Returns : hashref
+ Args    : none
+
+=cut
+
+sub get_params {
+  my $self = shift;
+
+  if (!defined $self->{_params}) {
+    $self->{_params} = $self->get_default_params;
+  }
+
+  return $self->{_params};
+}
+
+=head2 set_params
+
+ Title   : set_params
+ Usage   : $treeio->set_params($other_params);
+ Function: Applies all the parameters within the given hashmap into the TreeIO instance.
+ Example : 
+ Returns : Hashref
+ Args    : params (hashref)
+
+=cut
+
+sub set_params {
+  my $self = shift;
+  my $params = shift;
+
+  # Apply all the passed parameters to our internal parm hashref.
+  my $cur_params = $self->get_params;
+  $self->{_params} = { %$cur_params, %$params };
+
+  return $self->get_params;
+}
+
+=head2 get_default_params
+
+ Title   : get_default_params
+ Usage   : my $defaults = $treeio->get_default_params
+ Function: Gets a hashmap with the default parameters for a given TreeIO instance. To be overridden by sub-classes (i.e., newick.pm)
+ Example : 
+ Returns : Hashref
+ Args    : none
+
+=cut
+
+sub get_default_params {
+  my $self = shift;
+  
+  return {};
+}
+
+=head2 debug_params
+
+ Title   : debug_params
+ Usage   : $treeio->debug_params
+ Function: Prints all parameters to standard error output.
+ Example : 
+ Returns : none
+ Args    : none
+
+=cut
+
+sub debug_params {
+  my $self = shift;
+
+  my $params = $self->get_params;
+
+  print STDERR "{\n";
+  foreach my $param (keys %$params) {
+    my $value = $params->{$param};
+    print STDERR "  [$param] -> [$value]\n";
+  }
+  print STDERR "}\n";
+}
 
 =head2 _guess_format
 
