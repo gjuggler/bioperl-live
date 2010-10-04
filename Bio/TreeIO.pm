@@ -252,8 +252,8 @@ END
   return $ok;
 }
 
-=head2 param
 
+=head2 param
  Title   : param
  Usage   : my $newline_each_node = $treeio->param('newline_each_node');
  Function: Fetches (if no arguments are given) or sets (if an argument is given) the named parameter from the TreeIO object's internal hash.
@@ -324,7 +324,6 @@ sub params {
  Args    : none
 
 =cut
-
 sub get_params {
   my $self = shift;
 
